@@ -142,6 +142,153 @@ function mergeSql(sql: string, params: unknown[]): MergeResult {
   return { result: out, usedCount: pi, placeholderCount }
 }
 
+function formatSql(input: string): string {
+  if (!input) return ""
+
+  // First pass: uppercase SQL keywords only outside of quotes
+  const keywords = new Set([
+    "select",
+    "from",
+    "where",
+    "group",
+    "by",
+    "having",
+    "order",
+    "limit",
+    "offset",
+    "join",
+    "left",
+    "right",
+    "inner",
+    "outer",
+    "cross",
+    "on",
+    "and",
+    "or",
+    "union",
+    "all",
+    "into",
+    "values",
+    "set",
+    "update",
+    "insert",
+    "delete",
+    "distinct",
+    "as",
+    "case",
+    "when",
+    "then",
+    "end",
+    "is",
+    "null",
+    "like",
+    "in",
+    "exists",
+    "not",
+    "between",
+    "top",
+  ])
+
+  let inSingle = false
+  let inDouble = false
+  let inBack = false
+  let out = ""
+  let word = ""
+
+  const flushWord = () => {
+    if (word) {
+      const lower = word.toLowerCase()
+      out += keywords.has(lower) ? word.toUpperCase() : word
+      word = ""
+    }
+  }
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i]
+    const next = input[i + 1]
+
+    if (!inDouble && !inBack && ch === "'") {
+      flushWord()
+      if (inSingle && next === "'") {
+        out += "''"
+        i++
+        continue
+      }
+      inSingle = !inSingle
+      out += ch
+      continue
+    }
+
+    if (!inSingle && !inBack && ch === '"') {
+      flushWord()
+      if (inDouble && next === '"') {
+        out += '""'
+        i++
+        continue
+      }
+      inDouble = !inDouble
+      out += ch
+      continue
+    }
+
+    if (!inSingle && !inDouble && ch === "`") {
+      flushWord()
+      if (inBack && next === "`") {
+        out += "``"
+        i++
+        continue
+      }
+      inBack = !inBack
+      out += ch
+      continue
+    }
+
+    if (!inSingle && !inDouble && !inBack && /[A-Za-z]/.test(ch)) {
+      word += ch
+    } else {
+      flushWord()
+      out += ch
+    }
+  }
+  flushWord()
+
+  // Second pass: whitespace normalization and line breaks before major clauses.
+  let s = out
+    // collapse spaces/tabs but keep newlines
+    .replace(/[ \t]+/g, " ")
+    .replace(/\s*\n\s*/g, "\n")
+    .trim()
+
+  // Insert newlines before major clauses (longer phrases first)
+  s = s
+    .replace(/\s+(UNION\s+ALL)\b/g, "\n$1")
+    .replace(/\s+\b(LEFT\s+OUTER\s+JOIN)\b/g, "\n$1")
+    .replace(/\s+\b(RIGHT\s+OUTER\s+JOIN)\b/g, "\n$1")
+    .replace(/\s+\b(FULL\s+OUTER\s+JOIN)\b/g, "\n$1")
+    .replace(/\s+\b(INNER\s+JOIN)\b/g, "\n$1")
+    .replace(/\s+\b(LEFT\s+JOIN)\b/g, "\n$1")
+    .replace(/\s+\b(RIGHT\s+JOIN)\b/g, "\n$1")
+    .replace(/\s+\b(OUTER\s+JOIN)\b/g, "\n$1")
+    .replace(/\s+\b(CROSS\s+JOIN)\b/g, "\n$1")
+    .replace(/\s+\b(JOIN)\b/g, "\n$1")
+    .replace(/\s+\b(GROUP\s+BY)\b/g, "\n$1")
+    .replace(/\s+\b(ORDER\s+BY)\b/g, "\n$1")
+    .replace(/\s+\b(HAVING)\b/g, "\n$1")
+    .replace(/\s+\b(WHERE)\b/g, "\n$1")
+    .replace(/\s+\b(FROM)\b/g, "\n$1")
+    .replace(/\s+\b(UNION)\b/g, "\n$1")
+    .replace(/\s+\b(LIMIT)\b/g, "\n$1")
+    .replace(/\s+\b(OFFSET)\b/g, "\n$1")
+
+  // Put AND/OR on new lines with basic indentation (outside of strings due to first-pass capitalization)
+  s = s.replace(/\s+\b(AND|OR)\b/g, "\n  $1")
+
+  // Neaten multiple consecutive newlines
+  s = s.replace(/\n{3,}/g, "\n\n")
+
+  return s
+}
+
 export default function SqlMergeTool() {
   const [sql, setSql] = useState<string>("SELECT * FROM abc WHERE abc.id = ? AND abc.anotherId IN (?, ?)")
   const [paramsText, setParamsText] = useState<string>('["784", 123, 456]')
@@ -189,6 +336,18 @@ export default function SqlMergeTool() {
   const onLoadExample = () => {
     setSql("SELECT * FROM abc WHERE abc.id = ? AND abc.anotherId IN (?, ?)")
     setParamsText('["784", 123, 456]')
+    setMerged("")
+    setError("")
+    setCopied(false)
+  }
+
+  const onBeautify = () => {
+    setSql((prev) => formatSql(prev))
+  }
+
+  const onClear = () => {
+    setSql("")
+    setParamsText("")
     setMerged("")
     setError("")
     setCopied(false)
@@ -258,6 +417,20 @@ export default function SqlMergeTool() {
           className="inline-flex items-center rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-foreground hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
         >
           {copied ? "Copied!" : "Copy Output"}
+        </button>
+        <button
+          type="button"
+          onClick={onBeautify}
+          className="inline-flex items-center rounded-md bg-secondary px-3 py-2 text-sm font-medium text-secondary-foreground hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-ring"
+        >
+          Beautify SQL
+        </button>
+        <button
+          type="button"
+          onClick={onClear}
+          className="inline-flex items-center rounded-md bg-muted px-3 py-2 text-sm font-medium text-foreground hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-ring"
+        >
+          Clear
         </button>
       </div>
 

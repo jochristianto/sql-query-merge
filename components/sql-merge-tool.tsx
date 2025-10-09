@@ -1,6 +1,9 @@
 "use client"
 
 import { useMemo, useState } from "react"
+import { cn } from "@/lib/utils"
+import { ChevronDownIcon } from "lucide-react"
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "./ui/dropdown-menu"
 
 type MergeResult = {
   result: string
@@ -289,14 +292,204 @@ function formatSql(input: string): string {
   return s
 }
 
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+}
+
+function highlightSqlHtml(input: string): string {
+  if (!input) return ""
+
+  const keywords = new Set([
+    "select",
+    "from",
+    "where",
+    "group",
+    "by",
+    "having",
+    "order",
+    "limit",
+    "offset",
+    "join",
+    "left",
+    "right",
+    "inner",
+    "outer",
+    "cross",
+    "on",
+    "and",
+    "or",
+    "union",
+    "all",
+    "into",
+    "values",
+    "set",
+    "update",
+    "insert",
+    "delete",
+    "distinct",
+    "as",
+    "case",
+    "when",
+    "then",
+    "end",
+    "is",
+    "null",
+    "like",
+    "in",
+    "exists",
+    "not",
+    "between",
+    "top",
+  ])
+
+  let out = ""
+  let word = ""
+  let inSingle = false
+  let inDouble = false
+  let inBack = false
+
+  const flushWord = () => {
+    if (!word) return
+    const lower = word.toLowerCase()
+    if (keywords.has(lower)) {
+      out += `<span class="text-code-keyword font-medium">${escapeHtml(word.toUpperCase())}</span>`
+    } else {
+      out += escapeHtml(word)
+    }
+    word = ""
+  }
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i]
+    const next = input[i + 1] ?? ""
+
+    // String literals: single quotes
+    if (!inDouble && !inBack && ch === "'") {
+      flushWord()
+      // open/close single string; handle escaped ''
+      out += `<span class="text-accent-foreground">`
+      out += escapeHtml("'")
+      inSingle = !inSingle
+      while (inSingle && ++i < input.length) {
+        const c = input[i]
+        const n = input[i + 1] ?? ""
+        if (c === "'" && n === "'") {
+          out += escapeHtml("''")
+          i++
+          continue
+        }
+        if (c === "'") {
+          out += escapeHtml("'")
+          i++
+          inSingle = false
+          break
+        }
+        out += escapeHtml(c)
+      }
+      out += `</span>`
+      continue
+    }
+
+    // Double-quoted identifiers/strings (dialect-dependent)
+    if (!inSingle && !inBack && ch === '"') {
+      flushWord()
+      out += `<span class="text-muted-foreground">`
+      out += escapeHtml('"')
+      inDouble = !inDouble
+      while (inDouble && ++i < input.length) {
+        const c = input[i]
+        const n = input[i + 1] ?? ""
+        if (c === '"' && n === '"') {
+          out += escapeHtml('""')
+          i++
+          continue
+        }
+        if (c === '"') {
+          out += escapeHtml('"')
+          i++
+          inDouble = false
+          break
+        }
+        out += escapeHtml(c)
+      }
+      out += `</span>`
+      continue
+    }
+
+    // Backtick identifiers
+    if (!inSingle && !inDouble && ch === "`") {
+      flushWord()
+      out += `<span class="text-muted-foreground">`
+      out += escapeHtml("`")
+      inBack = !inBack
+      while (inBack && ++i < input.length) {
+        const c = input[i]
+        const n = input[i + 1] ?? ""
+        if (c === "`" && n === "`") {
+          out += escapeHtml("``")
+          i++
+          continue
+        }
+        if (c === "`") {
+          out += escapeHtml("`")
+          i++
+          inBack = false
+          break
+        }
+        out += escapeHtml(c)
+      }
+      out += `</span>`
+      continue
+    }
+
+    // Outside of quoted contexts
+    if (!inSingle && !inDouble && !inBack) {
+      // Numbers: simple integer/float
+      if (/[0-9]/.test(ch) || (ch === "." && /[0-9]/.test(next))) {
+        flushWord()
+        let num = ch
+        let j = i + 1
+        while (j < input.length && /[0-9_.]/.test(input[j])) j++
+        num = input.slice(i, j)
+        out += `<span class="text-secondary-foreground">${escapeHtml(num)}</span>`
+        i = j - 1
+        continue
+      }
+      // Words (letters/underscore)
+      if (/[A-Za-z_]/.test(ch)) {
+        word += ch
+        continue
+      }
+      // Boundary/non-word char
+      flushWord()
+      out += escapeHtml(ch)
+      continue
+    }
+
+    // Fallback (shouldn't reach due to in-quote handlers)
+    out += escapeHtml(ch)
+  }
+
+  flushWord()
+  return out
+}
+
 export default function SqlMergeTool() {
   const [sql, setSql] = useState<string>("SELECT * FROM abc WHERE abc.id = ? AND abc.anotherId IN (?, ?)")
   const [paramsText, setParamsText] = useState<string>('["784", 123, 456]')
   const [merged, setMerged] = useState<string>("")
+  const [formatted, setFormatted] = useState<string>("")
   const [error, setError] = useState<string>("")
   const [copied, setCopied] = useState<boolean>(false)
+  const [formatMode, setFormatMode] = useState<"beautify" | "minify">("beautify")
 
   const placeholderCount = useMemo(() => countPlaceholders(sql), [sql])
+  const highlighted = useMemo(() => highlightSqlHtml(formatted), [formatted])
 
   function parseParams(text: string): unknown[] | { error: string } {
     try {
@@ -310,22 +503,24 @@ export default function SqlMergeTool() {
     }
   }
 
-  const onMerge = () => {
+  const onMerge = async () => {
     setCopied(false)
     const parsed = parseParams(paramsText)
     if (Array.isArray(parsed)) {
       const r = mergeSql(sql, parsed)
       setMerged(r.result)
+      await updateFormatted(r.result)
       setError(r.error || "")
     } else {
       setMerged("")
+      setFormatted("")
       setError(parsed.error)
     }
   }
 
   const onCopy = async () => {
     try {
-      await navigator.clipboard.writeText(merged)
+      await navigator.clipboard.writeText(formatted)
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch {
@@ -334,123 +529,389 @@ export default function SqlMergeTool() {
   }
 
   const onLoadExample = () => {
-    setSql("SELECT * FROM abc WHERE abc.id = ? AND abc.anotherId IN (?, ?)")
-    setParamsText('["784", 123, 456]')
+    setSql(
+      [
+        "SELECT u.id, u.name, o.id AS order_id, SUM(oi.qty * oi.price) AS total",
+        "FROM users u",
+        "JOIN orders o ON o.user_id = u.id",
+        "LEFT JOIN order_items oi ON oi.order_id = o.id",
+        "WHERE u.status = ?",
+        "  AND o.created_at BETWEEN ? AND ?",
+        "  AND o.state IN (?, ?, ?)",
+        "GROUP BY u.id, u.name, o.id",
+        "HAVING SUM(oi.qty * oi.price) > ?",
+        "ORDER BY total DESC, u.name ASC",
+        "LIMIT ?",
+      ].join(" "),
+    )
+    setParamsText('["active", "2024-01-01", "2024-12-31", "processing", "shipped", "delivered", 1000, 50]')
     setMerged("")
+    setFormatted("")
     setError("")
     setCopied(false)
   }
 
-  const onBeautify = () => {
-    setSql((prev) => formatSql(prev))
+  const onLoadAdvancedExample = () => {
+    setSql(
+      [
+        "WITH recent_orders AS (",
+        "  SELECT o.id, o.user_id, SUM(oi.qty * oi.price) AS total",
+        "  FROM orders o",
+        "  JOIN order_items oi ON oi.order_id = o.id",
+        "  WHERE o.created_at >= ?",
+        "  GROUP BY o.id, o.user_id",
+        ")",
+        "SELECT u.id, u.name, ro.total,",
+        "  COUNT(*) OVER (PARTITION BY u.id) AS order_count",
+        "FROM users u",
+        "JOIN recent_orders ro ON ro.user_id = u.id",
+        "LEFT JOIN payments p ON p.order_id = ro.id AND p.status IN (?, ?)",
+        "WHERE u.region = ?",
+        "  AND ro.total > ?",
+        "  AND u.name LIKE ?",
+        "  AND u.id IN (?, ?)",
+        "GROUP BY u.id, u.name, ro.total",
+        "HAVING COUNT(p.id) >= ?",
+        "ORDER BY ro.total DESC, u.name ASC",
+        "LIMIT ?",
+        "OFFSET ?",
+      ].join(" "),
+    )
+    setParamsText('["2025-01-01", "succeeded", "pending", "NA", 500, "%son%", 101, 202, 1, 25, 0]')
+    setMerged("")
+    setFormatted("")
+    setError("")
+    setCopied(false)
   }
 
   const onClear = () => {
     setSql("")
     setParamsText("")
     setMerged("")
+    setFormatted("")
     setError("")
     setCopied(false)
   }
 
+  async function beautifyWithPMTSF(sql: string): Promise<string> {
+    if (!sql) return ""
+    try {
+      // Dynamic import supports Next.js's inferred deps; handle CJS interop
+      const mod: any = await import("poor-mans-t-sql-formatter")
+      const lib: any = mod?.default ?? mod
+
+      const options = {
+        // Readability-focused settings similar to beautifycode.net
+        indent: "  ",
+        spacesPerTab: 2,
+        maxLineWidth: 100,
+        statementBreaks: 2,
+        clauseBreaks: 1,
+        expandCommaLists: true,
+        trailingCommas: true,
+        spaceAfterExpandedComma: true,
+        expandBooleanExpressions: true,
+        expandCaseStatements: true,
+        expandBetweenConditions: true,
+        expandInLists: true,
+        breakJoinOnSections: true,
+        uppercaseKeywords: true,
+        coloring: false, // we already render our own highlight preview
+        // Leave keywordStandardization off to respect non-T-SQL dialects
+      }
+
+      const result = lib?.formatSql ? lib.formatSql(sql, options) : null
+      return typeof result?.text === "string" ? result.text : sql
+    } catch {
+      // Fallback to local formatter if the package isn't available
+      return formatSql(sql)
+    }
+  }
+
+  function minifySqlPreserveStrings(input: string): string {
+    if (!input) return ""
+    let out = ""
+    let inSingle = false
+    let inDouble = false
+    let inBack = false
+    let i = 0
+    let prevWasSpace = false
+
+    const appendSpace = () => {
+      const prev = out[out.length - 1]
+      // avoid spaces right after '(' or ',' and before ')' or ','
+      if (prev === "(" || prev === "," || !prev) return
+      out += " "
+    }
+
+    while (i < input.length) {
+      const ch = input[i]
+      const next = input[i + 1] ?? ""
+
+      // single-quoted string
+      if (!inDouble && !inBack && ch === "'") {
+        inSingle = true
+        out += "'"
+        i++
+        while (i < input.length && inSingle) {
+          const c = input[i]
+          const n = input[i + 1] ?? ""
+          if (c === "'" && n === "'") {
+            out += "''"
+            i += 2
+            continue
+          }
+          if (c === "'") {
+            out += "'"
+            i++
+            inSingle = false
+            break
+          }
+          out += c
+          i++
+        }
+        prevWasSpace = false
+        continue
+      }
+
+      // double-quoted string/identifier
+      if (!inSingle && !inBack && ch === '"') {
+        inDouble = true
+        out += '"'
+        i++
+        while (i < input.length && inDouble) {
+          const c = input[i]
+          const n = input[i + 1] ?? ""
+          if (c === '"' && n === '"') {
+            out += '""'
+            i += 2
+            continue
+          }
+          if (c === '"') {
+            out += '"'
+            i++
+            inDouble = false
+            break
+          }
+          out += c
+          i++
+        }
+        prevWasSpace = false
+        continue
+      }
+
+      // backtick identifier
+      if (!inSingle && !inDouble && ch === "`") {
+        inBack = true
+        out += "`"
+        i++
+        while (i < input.length && inBack) {
+          const c = input[i]
+          const n = input[i + 1] ?? ""
+          if (c === "`" && n === "`") {
+            out += "``"
+            i += 2
+            continue
+          }
+          if (c === "`") {
+            out += "`"
+            i++
+            inBack = false
+            break
+          }
+          out += c
+          i++
+        }
+        prevWasSpace = false
+        continue
+      }
+
+      // collapse whitespace outside quotes
+      if (!inSingle && !inDouble && !inBack && /\s/.test(ch)) {
+        if (!prevWasSpace) {
+          // peek next non-space
+          let k = i + 1
+          let nextNon = ""
+          while (k < input.length && /\s/.test(input[k])) k++
+          nextNon = input[k] ?? ""
+          if (nextNon !== ")" && nextNon !== ",") {
+            appendSpace()
+          }
+          prevWasSpace = true
+        }
+        i++
+        continue
+      }
+
+      // normal char
+      out += ch
+      prevWasSpace = false
+      i++
+    }
+
+    return out.trim()
+  }
+
+  async function updateFormatted(newMerged: string, mode: "beautify" | "minify" = formatMode) {
+    if (!newMerged) {
+      setFormatted("")
+      return
+    }
+    if (mode === "beautify") {
+      const pretty = await beautifyWithPMTSF(newMerged)
+      setFormatted(pretty)
+    } else {
+      setFormatted(minifySqlPreserveStrings(newMerged))
+    }
+  }
+
+  const onFormatModeChange = (mode: "beautify" | "minify") => {
+    setFormatMode(mode)
+    updateFormatted(merged, mode)
+  }
+
   return (
     <section className="grid gap-6">
-      <div className="grid gap-2">
-        <label htmlFor="sql" className="text-sm font-medium text-foreground">
-          SQL with {"'?'"} placeholders
-        </label>
-        <textarea
-          id="sql"
-          value={sql}
-          onChange={(e) => setSql(e.target.value)}
-          rows={6}
-          className="w-full resize-y rounded-md border border-input bg-background p-3 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
-          aria-describedby="sql-help"
-          spellCheck={false}
-        />
-        <div id="sql-help" className="text-xs text-muted-foreground">
-          Placeholders outside quotes will be replaced. Example:{" "}
-          {"SELECT * FROM abc WHERE id = ? AND anotherId IN (?, ?)"}
-        </div>
-        <div className="text-xs text-muted-foreground">
-          Detected placeholders: <span className="font-medium text-foreground">{placeholderCount}</span>
-        </div>
-      </div>
-
-      <div className="grid gap-2">
-        <label htmlFor="params" className="text-sm font-medium text-foreground">
-          Parameters (JSON array)
-        </label>
-        <textarea
-          id="params"
-          value={paramsText}
-          onChange={(e) => setParamsText(e.target.value)}
-          rows={4}
-          className="w-full resize-y rounded-md border border-input bg-background p-3 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
-          aria-describedby="params-help"
-          spellCheck={false}
-        />
-        <div id="params-help" className="text-xs text-muted-foreground">
-          Example: {'["784", 123, 456]'} — strings will be single-quoted and escaped, numbers left as-is.
-        </div>
-      </div>
-
+      {/* Toolbar: primary actions */}
       <div className="flex flex-wrap items-center gap-3">
         <button
           type="button"
           onClick={onMerge}
-          className="inline-flex items-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-ring"
+          className="inline-flex items-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 hover:cursor-pointer focus:outline-none focus:ring-2 focus:ring-ring"
         >
           Merge
         </button>
-        <button
-          type="button"
-          onClick={onLoadExample}
-          className="inline-flex items-center rounded-md bg-secondary px-3 py-2 text-sm font-medium text-secondary-foreground hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-ring"
-        >
-          Load Example
-        </button>
-        <button
-          type="button"
-          onClick={onCopy}
-          disabled={!merged}
-          className="inline-flex items-center rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-foreground hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
-        >
-          {copied ? "Copied!" : "Copy Output"}
-        </button>
-        <button
-          type="button"
-          onClick={onBeautify}
-          className="inline-flex items-center rounded-md bg-secondary px-3 py-2 text-sm font-medium text-secondary-foreground hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-ring"
-        >
-          Beautify SQL
-        </button>
+
+        <div className="inline-flex items-center gap-2">
+          <span className="text-sm text-muted-foreground">Format</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={formatMode === "beautify"}
+            onClick={async () => {
+              const next = formatMode === "beautify" ? "minify" : "beautify"
+              setFormatMode(next)
+              await updateFormatted(merged, next)
+            }}
+            data-state={formatMode === "beautify" ? "on" : "off"}
+            className="group relative inline-flex h-6 w-11 items-center rounded-full bg-muted transition-colors hover:cursor-pointer focus:outline-none focus:ring-2 focus:ring-ring data-[state=on]:bg-primary/20"
+          >
+            <span className="sr-only">Toggle Beautify/Minify</span>
+            <span
+              className={cn(
+                "inline-block h-5 w-5 transform rounded-full bg-primary transition-transform",
+                formatMode === "beautify" ? "translate-x-5" : "translate-x-1",
+              )}
+            />
+          </button>
+          <span className="text-xs text-muted-foreground min-w-14">
+            {formatMode === "beautify" ? "Beautify" : "Minify"}
+          </span>
+        </div>
+
         <button
           type="button"
           onClick={onClear}
-          className="inline-flex items-center rounded-md bg-muted px-3 py-2 text-sm font-medium text-foreground hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-ring"
+          className="inline-flex items-center rounded-md bg-muted px-3 py-2 text-sm font-medium text-foreground hover:opacity-90 hover:cursor-pointer focus:outline-none focus:ring-2 focus:ring-ring"
         >
           Clear
         </button>
+
+        <div className="inline-flex rounded-md shadow-sm overflow-hidden">
+          <button
+            type="button"
+            onClick={onLoadExample}
+            className="inline-flex items-center rounded-l-md bg-secondary px-3 py-2 text-sm font-medium text-secondary-foreground hover:opacity-90 hover:cursor-pointer focus:outline-none focus:ring-2 focus:ring-ring"
+          >
+            Load Example
+          </button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-label="Open examples menu"
+                className="inline-flex items-center justify-center rounded-r-md bg-secondary px-2 py-2 text-sm text-secondary-foreground hover:opacity-90 hover:cursor-pointer focus:outline-none focus:ring-2 focus:ring-ring border-l border-border"
+              >
+                <ChevronDownIcon className="size-4" aria-hidden="true" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" sideOffset={6}>
+              <DropdownMenuItem className="hover:cursor-pointer" onClick={onLoadAdvancedExample}>
+                Load advanced example
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
 
-      <div className="grid gap-2">
-        <label htmlFor="output" className="text-sm font-medium text-foreground">
-          Output (merged SQL)
-        </label>
-        <textarea
-          id="output"
-          value={merged}
-          readOnly
-          rows={5}
-          className="w-full resize-y rounded-md border border-input bg-muted p-3 text-sm text-foreground/90"
-          placeholder="Merged SQL will appear here"
-        />
-        {error ? (
-          <p className="text-sm text-destructive">{error}</p>
-        ) : merged ? (
-          <p className="text-xs text-muted-foreground">Merge completed successfully.</p>
-        ) : null}
+      {/* Main content: 2 columns on md+ */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Left: inputs */}
+        <div className="grid gap-4 self-start items-start">
+          <div className="grid gap-2 items-start">
+            <label htmlFor="sql" className="text-sm font-medium text-foreground">
+              SQL with {"'?'"} placeholders
+            </label>
+            <textarea
+              id="sql"
+              value={sql}
+              onChange={(e) => setSql(e.target.value)}
+              rows={6}
+              className="w-full resize-y rounded-md border border-input bg-background p-3 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
+              aria-describedby="sql-help"
+              spellCheck={false}
+            />
+            <div id="sql-help" className="text-xs text-muted-foreground">
+              Placeholders outside quotes will be replaced. Example:{" "}
+              {"SELECT * FROM abc WHERE id = ? AND anotherId IN (?, ?)"}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Detected placeholders: <span className="font-medium text-foreground">{placeholderCount}</span>
+            </div>
+          </div>
+
+          <div className="grid gap-2 items-start">
+            <label htmlFor="params" className="text-sm font-medium text-foreground">
+              Parameters (JSON array)
+            </label>
+            <textarea
+              id="params"
+              value={paramsText}
+              onChange={(e) => setParamsText(e.target.value)}
+              rows={4}
+              className="w-full resize-y rounded-md border border-input bg-background p-3 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
+              aria-describedby="params-help"
+              spellCheck={false}
+            />
+            <div id="params-help" className="text-xs text-muted-foreground">
+              Example: {'["784", 123, 456]'} — strings will be single-quoted and escaped, numbers left as-is.
+            </div>
+          </div>
+        </div>
+
+        {/* Right: output */}
+        <div className="flex h-full flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <label className="text-sm font-medium text-foreground">Output</label>
+            <button
+              type="button"
+              onClick={onCopy}
+              disabled={!formatted}
+              className="inline-flex items-center rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-foreground hover:opacity-90 hover:cursor-pointer focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
+            >
+              {copied ? "Copied!" : "Copy Output"}
+            </button>
+          </div>
+
+          <pre className="flex-1 min-h-0 overflow-auto rounded-md border border-input bg-background p-3 text-sm">
+            <code
+              className="font-mono text-foreground"
+              dangerouslySetInnerHTML={{
+                __html: formatted ? highlighted : escapeHtml('Run "Merge" to see the output here.'),
+              }}
+            />
+          </pre>
+        </div>
       </div>
     </section>
   )
